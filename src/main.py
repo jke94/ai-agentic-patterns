@@ -1,46 +1,53 @@
 # ═══════════════════════════════════════════════════════════════
-#  PATRÓN 5 — ORCHESTRATOR-WORKERS (jefe y especialistas)
+#  PATRÓN — ORCHESTRATOR-WORKERS
 # ═══════════════════════════════════════════════════════════════
 #
-#                ┌──▶ 📊 analista de mercado ──┐
-#   idea ──▶ 👔 ─┼──▶ 🔧 experto técnico     ──┼──▶ 👔 síntesis
-#                └──▶ ⚠️ analista de riesgos ──┘
-#              (fan-out: en paralelo)      (fan-in: juntar todo)
+#                         ┌──▶ 👷 Worker A ──┐
+#                         │                   │
+#   Entrada ──▶ 👔 ───────┼──▶ 👷 Worker B ──┼──▶ 👔 Orchestrator
+#                         │                   │
+#                         └──▶ 👷 Worker C ──┘
 #
-#  Idea clave: los tres especialistas trabajan A LA VEZ
-#  (asyncio.gather), cada uno con su propio prompt. Al final,
-#  el orquestador junta las tres opiniones en una sola respuesta.
+#                  FAN-OUT           FAN-IN
+#              (trabajo paralelo)  (síntesis)
 #
-#  Ejemplo: evaluar una idea de negocio con un comité de expertos.
+#  Idea clave:
+#  Un Orchestrator descompone una tarea en trabajos independientes
+#  y los distribuye entre múltiples Workers especializados.
+#
+#  Los Workers procesan la misma entrada desde perspectivas,
+#  capacidades o instrucciones diferentes y devuelven sus resultados.
+#
+#  Finalmente, el Orchestrator realiza el FAN-IN: recopila, contrasta
+#  y sintetiza los resultados para producir una respuesta final.
+#
+#  Flujo:
+#      Entrada → Orchestrator → Workers → Resultados → Orchestrator
+#
+#  Implementación:
+#      FAN-OUT → asyncio.gather(...)
+#      FAN-IN  → síntesis de los resultados
 # ═══════════════════════════════════════════════════════════════
 
 import os
 import asyncio
-from typing import Dict, Tuple, TypedDict
+from typing import TypedDict
 
-from ollama import AsyncClient
 from dotenv import load_dotenv
+from ollama import AsyncClient
 
 load_dotenv()
 
-MODEL = "gemma4:31b"
+MODEL = os.getenv("MODEL")
+OLLAMA_HOST = os.getenv("OLLAMA_HOST")
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY")
 
-# Configuración
+class OrchestrationResult(TypedDict):
+    workers: dict[str, str]
+    result: str
 
-OLLAMA_HOST = os.environ.get('OLLAMA_HOST')
-OLLAMA_API_KEY = os.environ.get('OLLAMA_API_KEY')
-
-class ResultadoComite(TypedDict):
-    opiniones: Dict[str, str]
-    veredicto: str
 
 def make_client() -> AsyncClient:
-    """
-    Crea un cliente Ollama con soporte para API Key.
-    Si no se proporciona OLLAMA_API_KEY funcionará igualmente
-    para instancias locales sin autenticación.
-    """
-
     return AsyncClient(
         host=OLLAMA_HOST,
         headers={
@@ -48,116 +55,149 @@ def make_client() -> AsyncClient:
         },
     )
 
-def paso(icono: str, mensaje: str) -> None:
-    print(f"{icono} {mensaje}")
-
-async def consultar_especialista(
+async def chat(
     client: AsyncClient,
-    rol: str,
-    instrucciones: str,
-    idea: str,
-) -> Tuple[str, str]:
+    system_prompt: str,
+    user_prompt: str,
+) -> str:
 
-    respuesta = await client.chat(
+    response = await client.chat(
         model=MODEL,
         messages=[
             {
                 "role": "system",
-                "content": instrucciones,
+                "content": system_prompt,
             },
             {
                 "role": "user",
-                "content": f"Idea de negocio: {idea}",
+                "content": user_prompt,
             },
         ],
     )
 
-    print(f"   ✔ {rol} ha terminado")
-
-    return rol, respuesta["message"]["content"]
+    return response["message"]["content"]
 
 
-async def evaluar_idea(
-    idea: str,
-    team:dict,
-    client: AsyncClient | None = None,
-) -> ResultadoComite:
+async def run_worker(
+    client: AsyncClient,
+    name: str,
+    instructions: str,
+    input_data: str,
+) -> tuple[str, str]:
 
-    client = client or make_client()
+    result = await chat(
+        client=client,
+        system_prompt=instructions,
+        user_prompt=input_data,
+    )
 
-    paso("🚀", "Fan-out: los especialistas trabajan en paralelo...")
+    print(f"   ✔ Worker '{name}' ha terminado")
 
-    pares = await asyncio.gather(
+    return name, result
+
+
+async def fan_out(
+    client: AsyncClient,
+    workers: dict[str, str],
+    input_data: str,
+) -> dict[str, str]:
+
+    results = await asyncio.gather(
         *[
-            consultar_especialista(
+            run_worker(
                 client,
-                rol,
-                instrucciones,
-                idea,
+                name,
+                instructions,
+                input_data,
             )
-            for rol, instrucciones in team.items()
+            for name, instructions in workers.items()
         ]
     )
 
-    opiniones = dict(pares)
+    return dict(results)
 
-    paso("👔", "Fan-in: sintetizando opiniones...")
 
-    contexto = "\n\n".join(
-        f"[{rol.upper()}]\n{texto}"
-        for rol, texto in opiniones.items()
+async def fan_in(
+    client: AsyncClient,
+    results: dict[str, str],
+) -> str:
+
+    context = "\n\n".join(
+        f"[{name.upper()}]\n{result}"
+        for name, result in results.items()
     )
 
-    sintesis = await client.chat(
-        model=MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "Eres el orquestador del comité. "
-                    "Integra las tres opiniones en un único veredicto. "
-                    "Indica si merece la pena intentarlo, por qué, "
-                    "y menciona desacuerdos si existen."
-                ),
-            },
-            {
-                "role": "user",
-                "content": contexto,
-            },
-        ],
+    return await chat(
+        client=client,
+        system_prompt=(
+            "Eres un orquestador. "
+            "Integra los resultados proporcionados por los workers. "
+            "Identifica coincidencias, discrepancias y conclusiones "
+            "relevantes. Produce una respuesta final coherente."
+        ),
+        user_prompt=context,
+    )
+
+
+async def orchestrate(
+    input_data: str,
+    workers: dict[str, str],
+    client: AsyncClient | None = None,
+) -> OrchestrationResult:
+
+    client = client or make_client()
+
+    print("🚀 FAN-OUT: ejecutando workers en paralelo...")
+
+    results = await fan_out(
+        client=client,
+        workers=workers,
+        input_data=input_data,
+    )
+
+    print("👔 FAN-IN: sintetizando resultados...")
+
+    result = await fan_in(
+        client=client,
+        results=results,
     )
 
     return {
-        "opiniones": opiniones,
-        "veredicto": sintesis["message"]["content"],
+        "workers": results,
+        "result": result,
     }
 
-async def main(idea:str, team:dict):
+async def main(
+    idea:str,
+    workers:dict
+):
 
-    resultado = await evaluar_idea(
-        idea,
-        team
+    result = await orchestrate(
+        input_data=idea,
+        workers=workers,
     )
 
-    paso("✅", "Veredicto del comité")
-    print(resultado["veredicto"])
+    print("\n✅ RESULTADO FINAL")
+    print(result["result"])
 
 if __name__ == "__main__":
 
     asyncio.run(main(
-        idea="una app que publique tweets de una estación meteorológica",
-        team= {
+        idea=(
+            "una empresa qué cree LLMs"
+        ),
+        workers={
             "mercado": (
-                "Eres analista de mercado. Di quién compraría esto, "
-                "qué competencia existe y cómo destacar. Sé breve."
+                "Analiza la oportunidad de mercado, "
+                "los clientes potenciales y la competencia. Se breve."
             ),
             "tecnico": (
-                "Eres ingeniero de software senior. Di qué haría falta "
-                "para construirlo y cuál es la parte más difícil. Sé breve."
+                "Analiza la viabilidad técnica, "
+                "la arquitectura necesaria y las dificultades. Se breve."
             ),
             "riesgos": (
-                "Eres analista de riesgos. Di las dos formas más probables "
-                "en que esta idea podría fracasar. Sé breve."
+                "Identifica los principales riesgos, "
+                "puntos de fallo y posibles mitigaciones. Se breve."
             ),
         }
     ))
