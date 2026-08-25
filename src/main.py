@@ -257,163 +257,17 @@ async def orchestrate(
 # CASO DE USO
 # ═══════════════════════════════════════════════════════════════
 
-async def main() -> None:
+async def main(
+    idea: str,
+    team: dict[str, str],
+    orchestrator: str,
+) -> None:
 
     result = await orchestrate(
-        input_data=(
-            "una empresa que crea modelos de lenguaje "
-            "especializados para empresas"
-        ),
+        input_data=idea,
+        workers=team,
 
-        workers={
-            "mercado": (
-                """
-Analiza la oportunidad de mercado.
-
-Tu respuesta debe estar escrita exclusivamente en Markdown.
-
-Utiliza exactamente esta estructura:
-
-### Oportunidad de mercado
-
-Explica brevemente la oportunidad.
-
-### Clientes potenciales
-
-Enumera los principales segmentos de clientes.
-
-### Competencia
-
-Identifica los principales tipos de competidores.
-
-### Diferenciación
-
-Explica cómo podría diferenciarse la empresa.
-
-Sé conciso y evita repetir información.
-"""
-            ),
-
-            "tecnico": (
-                """
-Analiza la viabilidad técnica del proyecto.
-
-Tu respuesta debe estar escrita exclusivamente en Markdown.
-
-Utiliza exactamente esta estructura:
-
-### Viabilidad técnica
-
-Indica si el proyecto es técnicamente viable y por qué.
-
-### Arquitectura
-
-Enumera los principales componentes técnicos necesarios.
-
-### Recursos
-
-Indica los principales recursos necesarios.
-
-### Dificultades
-
-Enumera las principales dificultades técnicas.
-
-Sé conciso y evita repetir información.
-"""
-            ),
-
-            "riesgos": (
-                """
-Analiza los principales riesgos del proyecto.
-
-Tu respuesta debe estar escrita exclusivamente en Markdown.
-
-Utiliza exactamente esta estructura:
-
-### Riesgos principales
-
-Enumera los riesgos más importantes.
-
-### Impacto
-
-Indica brevemente el impacto de cada riesgo.
-
-### Mitigación
-
-Propón una estrategia de mitigación para cada riesgo.
-
-### Puntos críticos
-
-Identifica los posibles puntos únicos de fallo.
-
-Sé conciso y evita repetir información.
-"""
-            ),
-        },
-
-        orchestrator=(
-            """
-Eres el Orchestrator de un equipo de Workers especializados.
-
-Has recibido varios análisis independientes sobre una misma entrada.
-
-Tu tarea es analizar, contrastar y sintetizar esos resultados.
-
-IMPORTANTE:
-- Devuelve exclusivamente Markdown.
-- No incluyas introducciones innecesarias.
-- No describas el proceso interno de los Workers.
-- No digas "como Orchestrator".
-- No repitas literalmente los análisis originales.
-- Identifica coincidencias y discrepancias.
-- Prioriza las conclusiones relevantes.
-- Si existe información contradictoria, indícalo.
-- Diferencia hechos, recomendaciones y riesgos.
-- Sé concreto y evita contenido redundante.
-
-Utiliza exactamente esta estructura:
-
-# Análisis consolidado
-
-## Resumen ejecutivo
-
-Resume en 3-5 frases las conclusiones más importantes.
-
-## Oportunidades
-
-Enumera las principales oportunidades identificadas.
-
-## Viabilidad
-
-Explica las conclusiones relacionadas con la viabilidad.
-
-## Riesgos
-
-Presenta los principales riesgos identificados.
-
-Utiliza una tabla Markdown con esta estructura:
-
-| Riesgo | Impacto | Mitigación |
-|---|---|---|
-| Riesgo identificado | Alto/Medio/Bajo | Medida propuesta |
-
-## Puntos de consenso
-
-Enumera las conclusiones en las que coinciden los Workers.
-
-## Discrepancias
-
-Indica únicamente las discrepancias relevantes entre los Workers.
-
-## Recomendación
-
-Proporciona una recomendación final clara.
-
-Finaliza con:
-
-**Conclusión:** [conclusión en una o dos frases]
-"""
-        ),
+        orchestrator=orchestrator,
     )
 
     # ═══════════════════════════════════════════════════════════
@@ -450,4 +304,25 @@ Finaliza con:
 # ═══════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main(
+        idea="una app que publique tweets de una estación meteorológica",
+        team={
+            "mercado": (
+                "Eres analista de mercado. Di quién compraría esto, "
+                "qué competencia existe y cómo destacar. Sé breve."
+            ),
+            "tecnico": (
+                "Eres ingeniero de software senior. Di qué haría falta "
+                "para construirlo y cuál es la parte más difícil. Sé breve."
+            ),
+            "riesgos": (
+                "Eres analista de riesgos. Di las dos formas más probables "
+                "en que esta idea podría fracasar. Sé breve."
+            ),
+        },
+        orchestrator=(
+            "Eres un analista senior. Sintetiza los análisis, "
+            "señala oportunidades, viabilidad y riesgos, y da una "
+            "recomendación final. Devuelve solo Markdown y sé breve."
+        ),
+    ))
