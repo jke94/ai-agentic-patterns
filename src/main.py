@@ -7,7 +7,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# MODEL = "minimax-m3"
 MODEL = "gemma4:31b"
 
 # Configuración
@@ -18,23 +17,6 @@ OLLAMA_API_KEY = os.environ.get('OLLAMA_API_KEY')
 class ResultadoComite(TypedDict):
     opiniones: Dict[str, str]
     veredicto: str
-
-
-EQUIPO = {
-    "mercado": (
-        "Eres analista de mercado. Di quién compraría esto, "
-        "qué competencia existe y cómo destacar. Sé breve."
-    ),
-    "tecnico": (
-        "Eres ingeniero de software senior. Di qué haría falta "
-        "para construirlo y cuál es la parte más difícil. Sé breve."
-    ),
-    "riesgos": (
-        "Eres analista de riesgos. Di las dos formas más probables "
-        "en que esta idea podría fracasar. Sé breve."
-    ),
-}
-
 
 def make_client() -> AsyncClient:
     """
@@ -83,6 +65,7 @@ async def consultar_especialista(
 
 async def evaluar_idea(
     idea: str,
+    team:dict,
     client: AsyncClient | None = None,
 ) -> ResultadoComite:
 
@@ -98,7 +81,7 @@ async def evaluar_idea(
                 instrucciones,
                 idea,
             )
-            for rol, instrucciones in EQUIPO.items()
+            for rol, instrucciones in team.items()
         ]
     )
 
@@ -136,16 +119,32 @@ async def evaluar_idea(
     }
 
 
-async def main():
+async def main(idea:str, team:dict):
 
     resultado = await evaluar_idea(
-        # "una app que avisa cuándo regar cada planta de tu casa"
-        "una app que publique tweets de una estación meteorológica"
+        idea,
+        team
     )
 
     paso("✅", "Veredicto del comité")
     print(resultado["veredicto"])
 
-
 if __name__ == "__main__":
-    asyncio.run(main())
+
+    asyncio.run(main(
+        idea="una app que publique tweets de una estación meteorológica",
+        team= {
+            "mercado": (
+                "Eres analista de mercado. Di quién compraría esto, "
+                "qué competencia existe y cómo destacar. Sé breve."
+            ),
+            "tecnico": (
+                "Eres ingeniero de software senior. Di qué haría falta "
+                "para construirlo y cuál es la parte más difícil. Sé breve."
+            ),
+            "riesgos": (
+                "Eres analista de riesgos. Di las dos formas más probables "
+                "en que esta idea podría fracasar. Sé breve."
+            ),
+        }
+    ))
