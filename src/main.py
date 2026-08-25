@@ -1,3 +1,19 @@
+# ═══════════════════════════════════════════════════════════════
+#  PATRÓN 5 — ORCHESTRATOR-WORKERS (jefe y especialistas)
+# ═══════════════════════════════════════════════════════════════
+#
+#                ┌──▶ 📊 analista de mercado ──┐
+#   idea ──▶ 👔 ─┼──▶ 🔧 experto técnico     ──┼──▶ 👔 síntesis
+#                └──▶ ⚠️ analista de riesgos ──┘
+#              (fan-out: en paralelo)      (fan-in: juntar todo)
+#
+#  Idea clave: los tres especialistas trabajan A LA VEZ
+#  (asyncio.gather), cada uno con su propio prompt. Al final,
+#  el orquestador junta las tres opiniones en una sola respuesta.
+#
+#  Ejemplo: evaluar una idea de negocio con un comité de expertos.
+# ═══════════════════════════════════════════════════════════════
+
 import os
 import asyncio
 from typing import Dict, Tuple, TypedDict
@@ -32,10 +48,8 @@ def make_client() -> AsyncClient:
         },
     )
 
-
 def paso(icono: str, mensaje: str) -> None:
     print(f"{icono} {mensaje}")
-
 
 async def consultar_especialista(
     client: AsyncClient,
@@ -117,7 +131,6 @@ async def evaluar_idea(
         "opiniones": opiniones,
         "veredicto": sintesis["message"]["content"],
     }
-
 
 async def main(idea:str, team:dict):
 
