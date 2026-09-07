@@ -389,7 +389,7 @@ TOOLS = [
 # ============================================================
 
 def review_branch(
-    llm: LLMProvider,
+    llmProvider: LLMProvider,
     owner: str,
     repo: str,
     base_branch: str,
@@ -412,7 +412,7 @@ def review_branch(
     ]
 
     while True:
-        assistant_msg = llm.chat(
+        assistant_msg = llmProvider.chat(
             messages=messages,
             tools=TOOLS,
             temperature=0.1,
@@ -479,15 +479,20 @@ def review_branch(
 # 7. Ejemplo de uso
 # ============================================================
 
-if __name__ == "__main__":
-    # --- Crear el proveedor Ollama ---
+def main():
+
+    MODEL = os.getenv("MODEL")
+    OLLAMA_HOST = os.getenv("OLLAMA_HOST")
+    OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY") # TODO: Currently not used, but can be used for future authentication if needed.
+
+    # Create Ollama provider instance
     ollama = OllamaProvider(
-        base_url="http://localhost:11434",
-        default_model="qwen2.5:14b",   # Cambia por el modelo que tengas con soporte de tools
+        base_url=OLLAMA_HOST,
+        default_model=MODEL,
     )
 
     report = review_branch(
-        llm=ollama,
+        llmProvider=ollama,
         owner="your-org",
         repo="your-repo",
         base_branch="main",
@@ -497,3 +502,6 @@ if __name__ == "__main__":
     )
 
     print(report)
+
+if __name__ == "__main__":
+    main()
