@@ -1,7 +1,7 @@
-#!/usr/bin/env python3
 """
-Git Branch Review Expert (C++) - Agente programático
-Usa únicamente la API REST de GitHub (sin clonar, sin PyGithub)
+Git branch review agent for C++ codebases.
+
+This script compares a feature branch against the base branch (main/master) and generates a structured review report focusing on technical risks, ownership, concurrency, architecture, ABI/API, and tests.
 """
 
 import os
@@ -9,9 +9,9 @@ import json
 import base64
 from typing import Optional, Dict, Any, List
 import requests
-from openai import OpenAI   # o anthropic / xai según prefieras
+from openai import OpenAI   # or anthropic / xai, as preferred
 
-# ====================== Configuración ======================
+# ====================== Configuration ======================
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_API = "https://api.github.com"
 HEADERS = {
@@ -20,21 +20,26 @@ HEADERS = {
     "X-GitHub-Api-Version": "2022-11-28"
 }
 
-client = OpenAI()   # Cambia por el SDK que uses
+client = OpenAI()   # Replace with the SDK you use
 
 
-# ====================== Helpers de la API de GitHub ======================
+# ====================== GitHub API helpers ======================
 def github_get(url: str, params: dict = None) -> Dict[str, Any]:
     resp = requests.get(url, headers=HEADERS, params=params, timeout=30)
     if resp.status_code == 404:
-        raise ValueError(f"Recurso no encontrado: {url}")
+        raise ValueError(f"Resource not found: {url}")
     resp.raise_for_status()
     return resp.json()
 
 
-def get_comparison(owner: str, repo: str, base: str, head: str) -> Dict[str, Any]:
+def get_comparison(
+        owner: str,
+        repo: str,
+        base: str,
+        head: str
+    ) -> Dict[str, Any]:
     """
-    Equivalente a: git diff base...head + git log base..head
+    Equivalent to: git diff base...head + git log base..head
     Endpoint: GET /repos/{owner}/{repo}/compare/{base}...{head}
     """
     url = f"{GITHUB_API}/repos/{owner}/{repo}/compare/{base}...{head}"
@@ -49,7 +54,7 @@ def get_comparison(owner: str, repo: str, base: str, head: str) -> Dict[str, Any
             "deletions": f.get("deletions", 0),
             "changes": f.get("changes", 0),
             "previous_filename": f.get("previous_filename"),
-            "patch": f.get("patch")                   # unified diff (puede ser None)
+            "patch": f.get("patch")                   # unified diff (may be None)
         })
 
     commits = [
@@ -74,7 +79,7 @@ def get_comparison(owner: str, repo: str, base: str, head: str) -> Dict[str, Any
 
 def get_pr_files(owner: str, repo: str, pr_number: int) -> Dict[str, Any]:
     """
-    Cuando existe un Pull Request → más preciso y completo.
+    When a Pull Request exists, this is more precise and complete.
     Endpoint: GET /repos/{owner}/{repo}/pulls/{pr_number}/files
     """
     url = f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}/files"
@@ -92,7 +97,7 @@ def get_pr_files(owner: str, repo: str, pr_number: int) -> Dict[str, Any]:
             "patch": f.get("patch")
         })
 
-    # También obtenemos info del PR
+    # Also retrieve PR information
     pr_url = f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}"
     pr = github_get(pr_url)
 
@@ -109,7 +114,7 @@ def get_pr_files(owner: str, repo: str, pr_number: int) -> Dict[str, Any]:
 
 def get_file_content(owner: str, repo: str, path: str, ref: str) -> str:
     """
-    Lee el contenido completo de un archivo en una rama concreta.
+    Read the complete content of a file on a specific branch.
     Endpoint: GET /repos/{owner}/{repo}/contents/{path}?ref={ref}
     """
     url = f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}"
@@ -122,7 +127,7 @@ def get_file_content(owner: str, repo: str, path: str, ref: str) -> str:
 
 def get_raw_diff(owner: str, repo: str, base: str, head: str) -> str:
     """
-    Diff completo en formato texto (útil cuando los patches individuales están truncados).
+    Complete diff in text format (useful when individual patches are truncated).
     """
     url = f"{GITHUB_API}/repos/{owner}/{repo}/compare/{base}...{head}"
     headers = HEADERS.copy()
@@ -132,7 +137,7 @@ def get_raw_diff(owner: str, repo: str, base: str, head: str) -> str:
     return resp.text
 
 
-# ====================== System Prompt (el original del agente) ======================
+# ====================== System Prompt (the agent's original prompt) ======================
 SYSTEM_PROMPT = """
 # VS Code Agent: Git Branch Review Expert (C++)
 
@@ -209,18 +214,18 @@ Be concise. Prioritize ownership, concurrency, architecture, ABI/API and tests.
 """
 
 
-# ====================== Tools schema para el LLM ======================
+# ====================== Tool schema for the LLM ======================
 TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "get_comparison",
-            "description": "Obtiene el resumen completo de cambios entre dos ramas (archivos, patches, commits). Úsalo siempre primero.",
+            "description": "Get the complete summary of changes between two branches (files, patches, commits). Always use this first.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "base": {"type": "string", "description": "Rama base (ej: main)"},
-                    "head": {"type": "string", "description": "Rama a revisar (feature)"}
+                    "base": {"type": "string", "description": "Base branch (for example, main)"},
+                    "head": {"type": "string", "description": "Branch to review (feature)"}
                 },
                 "required": ["base", "head"]
             }
@@ -230,7 +235,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_pr_files",
-            "description": "Si existe un Pull Request, usa este tool (más preciso). Devuelve los archivos cambiados + patches.",
+            "description": "If a Pull Request exists, use this tool (more precise). Returns changed files and patches.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -244,12 +249,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_file_content",
-            "description": "Lee el contenido completo de un archivo en una rama concreta (útil para ver contexto, headers, etc.).",
+            "description": "Read the complete content of a file on a specific branch (useful for viewing context, headers, etc.).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
-                    "ref": {"type": "string", "description": "Rama o SHA (normalmente la feature branch)"}
+                    "ref": {"type": "string", "description": "Branch or SHA (usually the feature branch)"}
                 },
                 "required": ["path", "ref"]
             }
@@ -259,7 +264,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "get_raw_diff",
-            "description": "Obtiene el diff completo en formato texto plano (usar cuando los patches individuales estén truncados).",
+            "description": "Get the complete diff in plain text format (use when individual patches are truncated).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -273,7 +278,7 @@ TOOLS = [
 ]
 
 
-# ====================== Bucle del agente ======================
+# ====================== Agent loop ======================
 def review_branch(
     owner: str,
     repo: str,
@@ -283,7 +288,7 @@ def review_branch(
     model: str = "gpt-4o"
 ) -> str:
 
-    # Inyectamos contexto fijo
+    # Inject fixed context
     context = {
         "owner": owner,
         "repo": repo,
@@ -297,10 +302,10 @@ def review_branch(
         {
             "role": "user",
             "content": (
-                f"Revisa la rama `{feature_branch}` contra `{base_branch}` "
-                f"del repositorio `{owner}/{repo}`.\n"
-                f"{'Existe el Pull Request #' + str(pr_number) if pr_number else 'No se ha indicado número de PR.'}\n\n"
-                "Sigue estrictamente el algoritmo y el formato de salida definidos."
+                f"Review the `{feature_branch}` branch against `{base_branch}` "
+                f"in the `{owner}/{repo}` repository.\n"
+                f"{'Pull Request #' + str(pr_number) + ' exists.' if pr_number else 'No PR number was provided.'}\n\n"
+                "Strictly follow the defined algorithm and output format."
             )
         }
     ]
@@ -334,14 +339,14 @@ def review_branch(
                 elif name == "get_raw_diff":
                     result = get_raw_diff(owner, repo, args["base"], args["head"])
                 else:
-                    result = f"Tool desconocida: {name}"
+                    result = f"Unknown tool: {name}"
             except Exception as e:
-                result = f"Error en la tool {name}: {str(e)}"
+                result = f"Error in tool {name}: {str(e)}"
 
-            # Limitamos tamaño de respuesta de tools para no saturar el contexto
+            # Limit tool response size to avoid overloading the context
             content = json.dumps(result, indent=2, ensure_ascii=False) if isinstance(result, (dict, list)) else str(result)
             if len(content) > 25000:
-                content = content[:25000] + "\n\n... [truncado por tamaño]"
+                content = content[:25000] + "\n\n... [truncated due to size]"
 
             messages.append({
                 "role": "tool",
@@ -350,14 +355,14 @@ def review_branch(
             })
 
 
-# ====================== Ejemplo de uso ======================
+# ====================== Usage example ======================
 if __name__ == "__main__":
     report = review_branch(
-        owner="tu-org",
-        repo="tu-repo",
+        owner="your-org",
+        repo="your-repo",
         base_branch="main",
-        feature_branch="feature/nueva-funcionalidad",
-        # pr_number=123,          # descomenta si tienes número de PR
+        feature_branch="feature/new-functionality",
+        # pr_number=123,          # uncomment if you have a PR number
         model="gpt-4o"
     )
     print(report)
