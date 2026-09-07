@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Git Branch Review Expert (C++) - Agente programático
-Con capa de abstracción de proveedores LLM.
-Implementación inicial: Ollama (local)
+Git Branch Review Expert (C++) - Programmatic Agent
+
+LLM provider abstraction layer.
+Initial implementation: Ollama (local or remote/web).
 """
 
 import os
@@ -13,127 +14,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 import requests
+from dotenv import load_dotenv
 
-
-# ============================================================
-# 1. Abstracción del proveedor de LLM
-# ============================================================
-
-@dataclass
-class ToolCall:
-    id: str
-    name: str
-    arguments: Dict[str, Any]
-
-
-@dataclass
-class AssistantMessage:
-    content: Optional[str] = None
-    tool_calls: List[ToolCall] = field(default_factory=list)
-
-    @property
-    def has_tool_calls(self) -> bool:
-        return len(self.tool_calls) > 0
-
-
-class LLMProvider(ABC):
-    """Interfaz abstracta que debe implementar cualquier proveedor."""
-
-    @abstractmethod
-    def chat(
-        self,
-        messages: List[Dict[str, Any]],
-        tools: List[Dict[str, Any]],
-        temperature: float = 0.1,
-        model: Optional[str] = None,
-    ) -> AssistantMessage:
-        """
-        Realiza una llamada de chat con soporte de tools.
-        Debe devolver un AssistantMessage unificado.
-        """
-        pass
-
+load_dotenv()
 
 # ============================================================
-# 2. Implementación para Ollama (usando API nativa)
-# ============================================================
-
-class OllamaProvider(LLMProvider):
-    """
-    Proveedor Ollama usando la API nativa /api/chat
-    (más fiable para tool calling que el endpoint OpenAI-compatible).
-    """
-
-    def __init__(
-        self,
-        base_url: str = "http://localhost:11434",
-        default_model: str = "qwen2.5:14b",  # o llama3.1, qwen3, etc. (modelos con tools)
-        timeout: int = 180,
-    ):
-        self.base_url = base_url.rstrip("/")
-        self.default_model = default_model
-        self.timeout = timeout
-
-    def chat(
-        self,
-        messages: List[Dict[str, Any]],
-        tools: List[Dict[str, Any]],
-        temperature: float = 0.1,
-        model: Optional[str] = None,
-    ) -> AssistantMessage:
-
-        payload = {
-            "model": model or self.default_model,
-            "messages": messages,
-            "stream": False,
-            "options": {
-                "temperature": temperature,
-            },
-        }
-
-        if tools:
-            payload["tools"] = tools
-
-        resp = requests.post(
-            f"{self.base_url}/api/chat",
-            json=payload,
-            timeout=self.timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
-        message = data.get("message", {})
-        content = message.get("content") or None
-
-        tool_calls: List[ToolCall] = []
-        raw_tool_calls = message.get("tool_calls") or []
-
-        for tc in raw_tool_calls:
-            # Ollama formato nativo
-            func = tc.get("function", {})
-            name = func.get("name")
-            arguments = func.get("arguments", {})
-
-            # A veces arguments viene como string
-            if isinstance(arguments, str):
-                try:
-                    arguments = json.loads(arguments)
-                except json.JSONDecodeError:
-                    arguments = {}
-
-            tool_calls.append(
-                ToolCall(
-                    id=str(uuid.uuid4()),  # Ollama no siempre devuelve id
-                    name=name,
-                    arguments=arguments,
-                )
-            )
-
-        return AssistantMessage(content=content, tool_calls=tool_calls)
-
-
-# ============================================================
-# 3. GitHub API helpers (sin cambios relevantes)
+# 0. GitHub API helpers
 # ============================================================
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
@@ -144,101 +30,8 @@ HEADERS = {
     "X-GitHub-Api-Version": "2022-11-28",
 }
 
-
-def github_get(url: str, params: dict = None) -> Dict[str, Any]:
-    resp = requests.get(url, headers=HEADERS, params=params, timeout=30)
-    if resp.status_code == 404:
-        raise ValueError(f"Resource not found: {url}")
-    resp.raise_for_status()
-    return resp.json()
-
-
-def get_comparison(owner: str, repo: str, base: str, head: str) -> Dict[str, Any]:
-    url = f"{GITHUB_API}/repos/{owner}/{repo}/compare/{base}...{head}"
-    data = github_get(url)
-
-    files = []
-    for f in data.get("files", []):
-        files.append({
-            "filename": f["filename"],
-            "status": f["status"],
-            "additions": f.get("additions", 0),
-            "deletions": f.get("deletions", 0),
-            "changes": f.get("changes", 0),
-            "previous_filename": f.get("previous_filename"),
-            "patch": f.get("patch"),
-        })
-
-    commits = [
-        {
-            "sha": c["sha"][:8],
-            "message": c["commit"]["message"].split("\n")[0],
-            "author": c["commit"]["author"]["name"],
-        }
-        for c in data.get("commits", [])
-    ]
-
-    return {
-        "status": data.get("status"),
-        "ahead_by": data.get("ahead_by"),
-        "behind_by": data.get("behind_by"),
-        "total_commits": data.get("total_commits"),
-        "commits": commits,
-        "files": files,
-        "html_url": data.get("html_url"),
-    }
-
-
-def get_pr_files(owner: str, repo: str, pr_number: int) -> Dict[str, Any]:
-    url = f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}/files"
-    files_data = github_get(url)
-
-    files = []
-    for f in files_data:
-        files.append({
-            "filename": f["filename"],
-            "status": f["status"],
-            "additions": f.get("additions", 0),
-            "deletions": f.get("deletions", 0),
-            "changes": f.get("changes", 0),
-            "previous_filename": f.get("previous_filename"),
-            "patch": f.get("patch"),
-        })
-
-    pr_url = f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}"
-    pr = github_get(pr_url)
-
-    return {
-        "title": pr.get("title"),
-        "body": pr.get("body"),
-        "state": pr.get("state"),
-        "base": pr["base"]["ref"],
-        "head": pr["head"]["ref"],
-        "html_url": pr.get("html_url"),
-        "files": files,
-    }
-
-
-def get_file_content(owner: str, repo: str, path: str, ref: str) -> str:
-    url = f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}"
-    data = github_get(url, params={"ref": ref})
-
-    if data.get("encoding") == "base64":
-        return base64.b64decode(data["content"]).decode("utf-8", errors="replace")
-    return data.get("content", "")
-
-
-def get_raw_diff(owner: str, repo: str, base: str, head: str) -> str:
-    url = f"{GITHUB_API}/repos/{owner}/{repo}/compare/{base}...{head}"
-    headers = HEADERS.copy()
-    headers["Accept"] = "application/vnd.github.v3.diff"
-    resp = requests.get(url, headers=headers, timeout=60)
-    resp.raise_for_status()
-    return resp.text
-
-
 # ============================================================
-# 4. System Prompt (sin cambios)
+# 1. System Prompt
 # ============================================================
 
 SYSTEM_PROMPT = """
@@ -316,9 +109,8 @@ Every finding must include:
 Be concise. Prioritize ownership, concurrency, architecture, ABI/API and tests.
 """
 
-
 # ============================================================
-# 5. Tool schemas
+# 2. Tool schemas
 # ============================================================
 
 TOOLS = [
@@ -383,20 +175,256 @@ TOOLS = [
     },
 ]
 
+def github_get(url: str, params: dict = None) -> Dict[str, Any]:
+    resp = requests.get(url, headers=HEADERS, params=params, timeout=30)
+    if resp.status_code == 404:
+        raise ValueError(f"Resource not found: {url}")
+    resp.raise_for_status()
+    return resp.json()
+
+
+def get_comparison(owner: str, repo: str, base: str, head: str) -> Dict[str, Any]:
+    """
+    Equivalent to: git diff base...head + git log base..head
+    Endpoint: GET /repos/{owner}/{repo}/compare/{base}...{head}
+    """
+    url = f"{GITHUB_API}/repos/{owner}/{repo}/compare/{base}...{head}"
+    data = github_get(url)
+
+    files = []
+    for f in data.get("files", []):
+        files.append({
+            "filename": f["filename"],
+            "status": f["status"],
+            "additions": f.get("additions", 0),
+            "deletions": f.get("deletions", 0),
+            "changes": f.get("changes", 0),
+            "previous_filename": f.get("previous_filename"),
+            "patch": f.get("patch"),
+        })
+
+    commits = [
+        {
+            "sha": c["sha"][:8],
+            "message": c["commit"]["message"].split("\n")[0],
+            "author": c["commit"]["author"]["name"],
+        }
+        for c in data.get("commits", [])
+    ]
+
+    return {
+        "status": data.get("status"),
+        "ahead_by": data.get("ahead_by"),
+        "behind_by": data.get("behind_by"),
+        "total_commits": data.get("total_commits"),
+        "commits": commits,
+        "files": files,
+        "html_url": data.get("html_url"),
+    }
+
+
+def get_pr_files(owner: str, repo: str, pr_number: int) -> Dict[str, Any]:
+    """
+    When a Pull Request exists, this is more precise and complete.
+    Endpoint: GET /repos/{owner}/{repo}/pulls/{pr_number}/files
+    """
+    url = f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}/files"
+    files_data = github_get(url)
+
+    files = []
+    for f in files_data:
+        files.append({
+            "filename": f["filename"],
+            "status": f["status"],
+            "additions": f.get("additions", 0),
+            "deletions": f.get("deletions", 0),
+            "changes": f.get("changes", 0),
+            "previous_filename": f.get("previous_filename"),
+            "patch": f.get("patch"),
+        })
+
+    pr_url = f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}"
+    pr = github_get(pr_url)
+
+    return {
+        "title": pr.get("title"),
+        "body": pr.get("body"),
+        "state": pr.get("state"),
+        "base": pr["base"]["ref"],
+        "head": pr["head"]["ref"],
+        "html_url": pr.get("html_url"),
+        "files": files,
+    }
+
+
+def get_file_content(owner: str, repo: str, path: str, ref: str) -> str:
+    """
+    Read the complete content of a file on a specific branch.
+    Endpoint: GET /repos/{owner}/{repo}/contents/{path}?ref={ref}
+    """
+    url = f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}"
+    data = github_get(url, params={"ref": ref})
+
+    if data.get("encoding") == "base64":
+        return base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+    return data.get("content", "")
+
+
+def get_raw_diff(owner: str, repo: str, base: str, head: str) -> str:
+    """
+    Complete diff in plain text format (useful when individual patches are truncated).
+    """
+    url = f"{GITHUB_API}/repos/{owner}/{repo}/compare/{base}...{head}"
+    headers = HEADERS.copy()
+    headers["Accept"] = "application/vnd.github.v3.diff"
+    resp = requests.get(url, headers=headers, timeout=60)
+    resp.raise_for_status()
+    return resp.text
+
 
 # ============================================================
-# 6. Agente (ahora desacoplado del proveedor)
+# 3. LLM Provider Abstraction
+# ============================================================
+
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    arguments: Dict[str, Any]
+
+
+@dataclass
+class AssistantMessage:
+    content: Optional[str] = None
+    tool_calls: List[ToolCall] = field(default_factory=list)
+
+    @property
+    def has_tool_calls(self) -> bool:
+        return len(self.tool_calls) > 0
+
+
+class LLMProvider(ABC):
+    """Abstract interface that any LLM provider must implement."""
+
+    @abstractmethod
+    def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        temperature: float = 0.1,
+    ) -> AssistantMessage:
+        """
+        Perform a chat completion with tool support.
+        Must return a unified AssistantMessage.
+        """
+        pass
+
+
+# ============================================================
+# 4. Ollama Provider (local or remote/web)
+# ============================================================
+
+class OllamaProvider(LLMProvider):
+    """
+    Ollama provider using the native /api/chat endpoint.
+    Supports both local instances and remote/web Ollama deployments.
+    API key is optional (required for some hosted/remote instances).
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        default_model: str,
+        api_key: Optional[str] = None,
+        timeout: int = 180,
+    ):
+        self.base_url = base_url.rstrip("/")
+        self.default_model = default_model
+        self.api_key = api_key
+        self.timeout = timeout
+
+    def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        temperature: float = 0.1,
+    ) -> AssistantMessage:
+
+        payload = {
+            "model": self.default_model,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+            },
+        }
+
+        if tools:
+            payload["tools"] = tools
+
+        headers = {
+            "Content-Type": "application/json",
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        resp = requests.post(
+            f"{self.base_url}/api/chat",
+            json=payload,
+            headers=headers,
+            timeout=self.timeout,
+        )
+        if not resp.ok:
+            raise RuntimeError(
+                f"Ollama API error ({resp.status_code}) at {self.base_url}/api/chat: "
+                f"{resp.text}"
+            )
+        data = resp.json()
+
+        message = data.get("message", {})
+        content = message.get("content") or None
+
+        tool_calls: List[ToolCall] = []
+        raw_tool_calls = message.get("tool_calls") or []
+
+        for tc in raw_tool_calls:
+            func = tc.get("function", {})
+            name = func.get("name")
+            arguments = func.get("arguments", {})
+
+            # Arguments may arrive as a JSON string
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
+
+            tool_calls.append(
+                ToolCall(
+                    id=str(uuid.uuid4()),  # Ollama does not always return an id
+                    name=name,
+                    arguments=arguments,
+                )
+            )
+
+        return AssistantMessage(content=content, tool_calls=tool_calls)
+
+# ============================================================
+# 5. Agent (decoupled from the concrete LLM provider)
 # ============================================================
 
 def review_branch(
-    llmProvider: LLMProvider,
+    llm_provider: LLMProvider,
     owner: str,
     repo: str,
     base_branch: str,
     feature_branch: str,
     pr_number: Optional[int] = None,
-    model: Optional[str] = None,
 ) -> str:
+    """
+    Run the branch review agent.
+    The model is configured inside the injected LLMProvider instance.
+    """
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -412,28 +440,27 @@ def review_branch(
     ]
 
     while True:
-        assistant_msg = llmProvider.chat(
+        assistant_msg = llm_provider.chat(
             messages=messages,
             tools=TOOLS,
             temperature=0.1,
-            model=model,
         )
 
-        # Convertimos a formato de mensaje para el historial
+        # Convert to a message dict for the conversation history
         msg_dict: Dict[str, Any] = {"role": "assistant"}
 
         if assistant_msg.content:
             msg_dict["content"] = assistant_msg.content
 
         if assistant_msg.has_tool_calls:
-            # Formato compatible con la mayoría de proveedores
+            # Format compatible with most providers
             msg_dict["tool_calls"] = [
                 {
                     "id": tc.id,
                     "type": "function",
                     "function": {
                         "name": tc.name,
-                        "arguments": json.dumps(tc.arguments),
+                        "arguments": tc.arguments,
                     },
                 }
                 for tc in assistant_msg.tool_calls
@@ -444,7 +471,7 @@ def review_branch(
         if not assistant_msg.has_tool_calls:
             return assistant_msg.content or ""
 
-        # Ejecutar tools
+        # Execute tools
         for tc in assistant_msg.tool_calls:
             try:
                 if tc.name == "get_comparison":
@@ -476,29 +503,52 @@ def review_branch(
 
 
 # ============================================================
-# 7. Ejemplo de uso
+# 6. Example usage
 # ============================================================
 
 def main():
 
-    MODEL = os.getenv("MODEL")
-    OLLAMA_HOST = os.getenv("OLLAMA_HOST")
-    OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY") # TODO: Currently not used, but can be used for future authentication if needed.
+    model = os.getenv("MODEL")
+    ollama_host = os.getenv("OLLAMA_HOST")
+    ollama_api_key = os.getenv("OLLAMA_API_KEY")
 
-    # Create Ollama provider instance
+    github_owner = os.getenv("GITHUB_OWNER")
+    github_repo = os.getenv("GITHUB_REPOSITORY")
+    base_branch = os.getenv("BASE_BRANCH")
+    feature_branch = os.getenv("FEATURE_BRANCH")
+
+    required_settings = {
+        "MODEL": model,
+        "OLLAMA_HOST": ollama_host,
+        "GITHUB_OWNER": github_owner,
+        "GITHUB_REPOSITORY": github_repo,
+        "BASE_BRANCH": base_branch,
+        "FEATURE_BRANCH": feature_branch,
+    }
+    missing_settings = [
+        name for name, value in required_settings.items() if not value
+    ]
+    if missing_settings:
+        raise RuntimeError(
+            "Missing required environment variables: "
+            + ", ".join(missing_settings)
+        )
+
+    # Create Ollama provider instance (model is injected here)
     ollama = OllamaProvider(
-        base_url=OLLAMA_HOST,
-        default_model=MODEL,
+        base_url=ollama_host,
+        default_model=model,
+        api_key=ollama_api_key,
+        timeout=180,
     )
 
     report = review_branch(
-        llmProvider=ollama,
-        owner="your-org",
-        repo="your-repo",
-        base_branch="main",
-        feature_branch="feature/new-functionality",
+        llm_provider=ollama,
+        owner=github_owner,
+        repo=github_repo,
+        base_branch=base_branch,
+        feature_branch=feature_branch,
         # pr_number=123,
-        # model="llama3.1:70b",   # opcional: sobrescribir modelo
     )
 
     print(report)
