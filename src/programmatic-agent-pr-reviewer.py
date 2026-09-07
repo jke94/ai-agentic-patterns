@@ -14,6 +14,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -29,6 +31,23 @@ HEADERS = {
     "Authorization": f"Bearer {GITHUB_TOKEN}" if GITHUB_TOKEN else "",
     "X-GitHub-Api-Version": "2022-11-28",
 }
+
+
+# Shared HTTP session with retries/backoff
+def create_retry_session():
+    retry = Retry(
+        total=5,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET", "POST"],
+        raise_on_status=False,
+    )
+    session = requests.Session()
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    session.mount("http://", HTTPAdapter(max_retries=retry))
+    return session
+
+HTTP_SESSION = create_retry_session()
 
 # ============================================================
 # 1. System Prompt
@@ -176,7 +195,7 @@ TOOLS = [
 ]
 
 def github_get(url: str, params: dict = None) -> Dict[str, Any]:
-    resp = requests.get(url, headers=HEADERS, params=params, timeout=30)
+    resp = HTTP_SESSION.get(url, headers=HEADERS, params=params, timeout=30)
     if resp.status_code == 404:
         raise ValueError(f"Resource not found: {url}")
     resp.raise_for_status()
@@ -277,7 +296,7 @@ def get_raw_diff(owner: str, repo: str, base: str, head: str) -> str:
     url = f"{GITHUB_API}/repos/{owner}/{repo}/compare/{base}...{head}"
     headers = HEADERS.copy()
     headers["Accept"] = "application/vnd.github.v3.diff"
-    resp = requests.get(url, headers=headers, timeout=60)
+    resp = HTTP_SESSION.get(url, headers=headers, timeout=60)
     resp.raise_for_status()
     return resp.text
 
@@ -368,7 +387,7 @@ class OllamaProvider(LLMProvider):
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        resp = requests.post(
+        resp = HTTP_SESSION.post(
             f"{self.base_url}/api/chat",
             json=payload,
             headers=headers,
@@ -439,7 +458,9 @@ def review_branch(
         },
     ]
 
-    while True:
+    MAX_ITERATIONS = 20
+
+    for iteration in range(MAX_ITERATIONS):
         assistant_msg = llm_provider.chat(
             messages=messages,
             tools=TOOLS,
@@ -472,18 +493,17 @@ def review_branch(
             return assistant_msg.content or ""
 
         # Execute tools
+        TOOL_REGISTRY = {
+            "get_comparison": lambda args: get_comparison(owner, repo, args["base"], args["head"]),
+            "get_pr_files": lambda args: get_pr_files(owner, repo, args["pr_number"]),
+            "get_file_content": lambda args: get_file_content(owner, repo, args["path"], args["ref"]),
+            "get_raw_diff": lambda args: get_raw_diff(owner, repo, args["base"], args["head"]),
+        }
+
         for tc in assistant_msg.tool_calls:
             try:
-                if tc.name == "get_comparison":
-                    result = get_comparison(owner, repo, tc.arguments["base"], tc.arguments["head"])
-                elif tc.name == "get_pr_files":
-                    result = get_pr_files(owner, repo, tc.arguments["pr_number"])
-                elif tc.name == "get_file_content":
-                    result = get_file_content(owner, repo, tc.arguments["path"], tc.arguments["ref"])
-                elif tc.name == "get_raw_diff":
-                    result = get_raw_diff(owner, repo, tc.arguments["base"], tc.arguments["head"])
-                else:
-                    result = f"Unknown tool: {tc.name}"
+                tool = TOOL_REGISTRY.get(tc.name)
+                result = tool(tc.arguments) if tool else f"Unknown tool: {tc.name}"
             except Exception as e:
                 result = f"Error in tool {tc.name}: {str(e)}"
 
@@ -501,6 +521,8 @@ def review_branch(
                 "content": content,
             })
 
+
+    raise RuntimeError(f"Maximum agent iterations reached ({MAX_ITERATIONS}). Possible tool-calling loop detected.")
 
 # ============================================================
 # 6. Example usage
