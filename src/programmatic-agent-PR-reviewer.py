@@ -1,29 +1,150 @@
+#!/usr/bin/env python3
 """
-Git branch review agent for C++ codebases.
-
-This script compares a feature branch against the base branch (main/master) and generates a structured review report focusing on technical risks, ownership, concurrency, architecture, ABI/API, and tests.
+Git Branch Review Expert (C++) - Agente programático
+Con capa de abstracción de proveedores LLM.
+Implementación inicial: Ollama (local)
 """
 
 import os
 import json
 import base64
+import uuid
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 import requests
-from openai import OpenAI   # or anthropic / xai, as preferred
 
-# ====================== Configuration ======================
+
+# ============================================================
+# 1. Abstracción del proveedor de LLM
+# ============================================================
+
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    arguments: Dict[str, Any]
+
+
+@dataclass
+class AssistantMessage:
+    content: Optional[str] = None
+    tool_calls: List[ToolCall] = field(default_factory=list)
+
+    @property
+    def has_tool_calls(self) -> bool:
+        return len(self.tool_calls) > 0
+
+
+class LLMProvider(ABC):
+    """Interfaz abstracta que debe implementar cualquier proveedor."""
+
+    @abstractmethod
+    def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        temperature: float = 0.1,
+        model: Optional[str] = None,
+    ) -> AssistantMessage:
+        """
+        Realiza una llamada de chat con soporte de tools.
+        Debe devolver un AssistantMessage unificado.
+        """
+        pass
+
+
+# ============================================================
+# 2. Implementación para Ollama (usando API nativa)
+# ============================================================
+
+class OllamaProvider(LLMProvider):
+    """
+    Proveedor Ollama usando la API nativa /api/chat
+    (más fiable para tool calling que el endpoint OpenAI-compatible).
+    """
+
+    def __init__(
+        self,
+        base_url: str = "http://localhost:11434",
+        default_model: str = "qwen2.5:14b",  # o llama3.1, qwen3, etc. (modelos con tools)
+        timeout: int = 180,
+    ):
+        self.base_url = base_url.rstrip("/")
+        self.default_model = default_model
+        self.timeout = timeout
+
+    def chat(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        temperature: float = 0.1,
+        model: Optional[str] = None,
+    ) -> AssistantMessage:
+
+        payload = {
+            "model": model or self.default_model,
+            "messages": messages,
+            "stream": False,
+            "options": {
+                "temperature": temperature,
+            },
+        }
+
+        if tools:
+            payload["tools"] = tools
+
+        resp = requests.post(
+            f"{self.base_url}/api/chat",
+            json=payload,
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        message = data.get("message", {})
+        content = message.get("content") or None
+
+        tool_calls: List[ToolCall] = []
+        raw_tool_calls = message.get("tool_calls") or []
+
+        for tc in raw_tool_calls:
+            # Ollama formato nativo
+            func = tc.get("function", {})
+            name = func.get("name")
+            arguments = func.get("arguments", {})
+
+            # A veces arguments viene como string
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    arguments = {}
+
+            tool_calls.append(
+                ToolCall(
+                    id=str(uuid.uuid4()),  # Ollama no siempre devuelve id
+                    name=name,
+                    arguments=arguments,
+                )
+            )
+
+        return AssistantMessage(content=content, tool_calls=tool_calls)
+
+
+# ============================================================
+# 3. GitHub API helpers (sin cambios relevantes)
+# ============================================================
+
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_API = "https://api.github.com"
 HEADERS = {
     "Accept": "application/vnd.github+json",
     "Authorization": f"Bearer {GITHUB_TOKEN}" if GITHUB_TOKEN else "",
-    "X-GitHub-Api-Version": "2022-11-28"
+    "X-GitHub-Api-Version": "2022-11-28",
 }
 
-client = OpenAI()   # Replace with the SDK you use
 
-
-# ====================== GitHub API helpers ======================
 def github_get(url: str, params: dict = None) -> Dict[str, Any]:
     resp = requests.get(url, headers=HEADERS, params=params, timeout=30)
     if resp.status_code == 404:
@@ -32,16 +153,7 @@ def github_get(url: str, params: dict = None) -> Dict[str, Any]:
     return resp.json()
 
 
-def get_comparison(
-        owner: str,
-        repo: str,
-        base: str,
-        head: str
-    ) -> Dict[str, Any]:
-    """
-    Equivalent to: git diff base...head + git log base..head
-    Endpoint: GET /repos/{owner}/{repo}/compare/{base}...{head}
-    """
+def get_comparison(owner: str, repo: str, base: str, head: str) -> Dict[str, Any]:
     url = f"{GITHUB_API}/repos/{owner}/{repo}/compare/{base}...{head}"
     data = github_get(url)
 
@@ -49,19 +161,19 @@ def get_comparison(
     for f in data.get("files", []):
         files.append({
             "filename": f["filename"],
-            "status": f["status"],                    # added, modified, removed, renamed
+            "status": f["status"],
             "additions": f.get("additions", 0),
             "deletions": f.get("deletions", 0),
             "changes": f.get("changes", 0),
             "previous_filename": f.get("previous_filename"),
-            "patch": f.get("patch")                   # unified diff (may be None)
+            "patch": f.get("patch"),
         })
 
     commits = [
         {
             "sha": c["sha"][:8],
             "message": c["commit"]["message"].split("\n")[0],
-            "author": c["commit"]["author"]["name"]
+            "author": c["commit"]["author"]["name"],
         }
         for c in data.get("commits", [])
     ]
@@ -73,15 +185,11 @@ def get_comparison(
         "total_commits": data.get("total_commits"),
         "commits": commits,
         "files": files,
-        "html_url": data.get("html_url")
+        "html_url": data.get("html_url"),
     }
 
 
 def get_pr_files(owner: str, repo: str, pr_number: int) -> Dict[str, Any]:
-    """
-    When a Pull Request exists, this is more precise and complete.
-    Endpoint: GET /repos/{owner}/{repo}/pulls/{pr_number}/files
-    """
     url = f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}/files"
     files_data = github_get(url)
 
@@ -94,10 +202,9 @@ def get_pr_files(owner: str, repo: str, pr_number: int) -> Dict[str, Any]:
             "deletions": f.get("deletions", 0),
             "changes": f.get("changes", 0),
             "previous_filename": f.get("previous_filename"),
-            "patch": f.get("patch")
+            "patch": f.get("patch"),
         })
 
-    # Also retrieve PR information
     pr_url = f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}"
     pr = github_get(pr_url)
 
@@ -108,15 +215,11 @@ def get_pr_files(owner: str, repo: str, pr_number: int) -> Dict[str, Any]:
         "base": pr["base"]["ref"],
         "head": pr["head"]["ref"],
         "html_url": pr.get("html_url"),
-        "files": files
+        "files": files,
     }
 
 
 def get_file_content(owner: str, repo: str, path: str, ref: str) -> str:
-    """
-    Read the complete content of a file on a specific branch.
-    Endpoint: GET /repos/{owner}/{repo}/contents/{path}?ref={ref}
-    """
     url = f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}"
     data = github_get(url, params={"ref": ref})
 
@@ -126,9 +229,6 @@ def get_file_content(owner: str, repo: str, path: str, ref: str) -> str:
 
 
 def get_raw_diff(owner: str, repo: str, base: str, head: str) -> str:
-    """
-    Complete diff in text format (useful when individual patches are truncated).
-    """
     url = f"{GITHUB_API}/repos/{owner}/{repo}/compare/{base}...{head}"
     headers = HEADERS.copy()
     headers["Accept"] = "application/vnd.github.v3.diff"
@@ -137,7 +237,10 @@ def get_raw_diff(owner: str, repo: str, base: str, head: str) -> str:
     return resp.text
 
 
-# ====================== System Prompt (the agent's original prompt) ======================
+# ============================================================
+# 4. System Prompt (sin cambios)
+# ============================================================
+
 SYSTEM_PROMPT = """
 # VS Code Agent: Git Branch Review Expert (C++)
 
@@ -214,7 +317,10 @@ Be concise. Prioritize ownership, concurrency, architecture, ABI/API and tests.
 """
 
 
-# ====================== Tool schema for the LLM ======================
+# ============================================================
+# 5. Tool schemas
+# ============================================================
+
 TOOLS = [
     {
         "type": "function",
@@ -224,78 +330,73 @@ TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "base": {"type": "string", "description": "Base branch (for example, main)"},
-                    "head": {"type": "string", "description": "Branch to review (feature)"}
+                    "base": {"type": "string", "description": "Base branch (e.g. main)"},
+                    "head": {"type": "string", "description": "Branch to review (feature)"},
                 },
-                "required": ["base", "head"]
-            }
-        }
+                "required": ["base", "head"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "get_pr_files",
-            "description": "If a Pull Request exists, use this tool (more precise). Returns changed files and patches.",
+            "description": "If a Pull Request exists, use this tool (more precise). Returns changed files + patches.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "pr_number": {"type": "integer"}
+                    "pr_number": {"type": "integer"},
                 },
-                "required": ["pr_number"]
-            }
-        }
+                "required": ["pr_number"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "get_file_content",
-            "description": "Read the complete content of a file on a specific branch (useful for viewing context, headers, etc.).",
+            "description": "Read the complete content of a file on a specific branch.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
-                    "ref": {"type": "string", "description": "Branch or SHA (usually the feature branch)"}
+                    "ref": {"type": "string", "description": "Branch or SHA"},
                 },
-                "required": ["path", "ref"]
-            }
-        }
+                "required": ["path", "ref"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "get_raw_diff",
-            "description": "Get the complete diff in plain text format (use when individual patches are truncated).",
+            "description": "Get the complete diff in plain text (use when individual patches are truncated).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "base": {"type": "string"},
-                    "head": {"type": "string"}
+                    "head": {"type": "string"},
                 },
-                "required": ["base", "head"]
-            }
-        }
-    }
+                "required": ["base", "head"],
+            },
+        },
+    },
 ]
 
 
-# ====================== Agent loop ======================
+# ============================================================
+# 6. Agente (ahora desacoplado del proveedor)
+# ============================================================
+
 def review_branch(
+    llm: LLMProvider,
     owner: str,
     repo: str,
     base_branch: str,
     feature_branch: str,
     pr_number: Optional[int] = None,
-    model: str = "gpt-4o"
+    model: Optional[str] = None,
 ) -> str:
-
-    # Inject fixed context
-    context = {
-        "owner": owner,
-        "repo": repo,
-        "base_branch": base_branch,
-        "feature_branch": feature_branch,
-        "pr_number": pr_number
-    }
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -306,63 +407,93 @@ def review_branch(
                 f"in the `{owner}/{repo}` repository.\n"
                 f"{'Pull Request #' + str(pr_number) + ' exists.' if pr_number else 'No PR number was provided.'}\n\n"
                 "Strictly follow the defined algorithm and output format."
-            )
-        }
+            ),
+        },
     ]
 
     while True:
-        response = client.chat.completions.create(
-            model=model,
+        assistant_msg = llm.chat(
             messages=messages,
             tools=TOOLS,
-            tool_choice="auto",
-            temperature=0.1
+            temperature=0.1,
+            model=model,
         )
 
-        msg = response.choices[0].message
-        messages.append(msg)
+        # Convertimos a formato de mensaje para el historial
+        msg_dict: Dict[str, Any] = {"role": "assistant"}
 
-        if not msg.tool_calls:
-            return msg.content
+        if assistant_msg.content:
+            msg_dict["content"] = assistant_msg.content
 
-        for tool_call in msg.tool_calls:
-            name = tool_call.function.name
-            args = json.loads(tool_call.function.arguments)
+        if assistant_msg.has_tool_calls:
+            # Formato compatible con la mayoría de proveedores
+            msg_dict["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": json.dumps(tc.arguments),
+                    },
+                }
+                for tc in assistant_msg.tool_calls
+            ]
 
+        messages.append(msg_dict)
+
+        if not assistant_msg.has_tool_calls:
+            return assistant_msg.content or ""
+
+        # Ejecutar tools
+        for tc in assistant_msg.tool_calls:
             try:
-                if name == "get_comparison":
-                    result = get_comparison(owner, repo, args["base"], args["head"])
-                elif name == "get_pr_files":
-                    result = get_pr_files(owner, repo, args["pr_number"])
-                elif name == "get_file_content":
-                    result = get_file_content(owner, repo, args["path"], args["ref"])
-                elif name == "get_raw_diff":
-                    result = get_raw_diff(owner, repo, args["base"], args["head"])
+                if tc.name == "get_comparison":
+                    result = get_comparison(owner, repo, tc.arguments["base"], tc.arguments["head"])
+                elif tc.name == "get_pr_files":
+                    result = get_pr_files(owner, repo, tc.arguments["pr_number"])
+                elif tc.name == "get_file_content":
+                    result = get_file_content(owner, repo, tc.arguments["path"], tc.arguments["ref"])
+                elif tc.name == "get_raw_diff":
+                    result = get_raw_diff(owner, repo, tc.arguments["base"], tc.arguments["head"])
                 else:
-                    result = f"Unknown tool: {name}"
+                    result = f"Unknown tool: {tc.name}"
             except Exception as e:
-                result = f"Error in tool {name}: {str(e)}"
+                result = f"Error in tool {tc.name}: {str(e)}"
 
-            # Limit tool response size to avoid overloading the context
-            content = json.dumps(result, indent=2, ensure_ascii=False) if isinstance(result, (dict, list)) else str(result)
+            content = (
+                json.dumps(result, indent=2, ensure_ascii=False)
+                if isinstance(result, (dict, list))
+                else str(result)
+            )
             if len(content) > 25000:
                 content = content[:25000] + "\n\n... [truncated due to size]"
 
             messages.append({
                 "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": content
+                "tool_call_id": tc.id,
+                "content": content,
             })
 
 
-# ====================== Usage example ======================
+# ============================================================
+# 7. Ejemplo de uso
+# ============================================================
+
 if __name__ == "__main__":
+    # --- Crear el proveedor Ollama ---
+    ollama = OllamaProvider(
+        base_url="http://localhost:11434",
+        default_model="qwen2.5:14b",   # Cambia por el modelo que tengas con soporte de tools
+    )
+
     report = review_branch(
+        llm=ollama,
         owner="your-org",
         repo="your-repo",
         base_branch="main",
         feature_branch="feature/new-functionality",
-        # pr_number=123,          # uncomment if you have a PR number
-        model="gpt-4o"
+        # pr_number=123,
+        # model="llama3.1:70b",   # opcional: sobrescribir modelo
     )
+
     print(report)
