@@ -3,20 +3,20 @@
 Git Branch Review Expert (C++) - Programmatic Agent
 
 LLM provider abstraction layer.
-Initial implementation: Ollama (local or remote/web).
+Initial implementation: Ollama cloud / remote web endpoint.
 """
 
-import os
-import json
-import base64
-import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 from dotenv import load_dotenv
+from requests.adapters import HTTPAdapter
+from typing import Optional, Dict, Any, List
+from urllib3.util.retry import Retry
+import base64
+import json
+import os
+import requests
+import uuid
 
 load_dotenv()
 
@@ -48,6 +48,8 @@ def create_retry_session():
     return session
 
 HTTP_SESSION = create_retry_session()
+MAX_AGENT_ITERATIONS = 20
+DEFAULT_LLM_TIMEOUT = 180
 
 # ============================================================
 # 1. System Prompt
@@ -194,7 +196,7 @@ TOOLS = [
     },
 ]
 
-def github_get(url: str, params: dict = None) -> Dict[str, Any]:
+def github_get(url: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     resp = HTTP_SESSION.get(url, headers=HEADERS, params=params, timeout=30)
     if resp.status_code == 404:
         raise ValueError(f"Resource not found: {url}")
@@ -346,8 +348,8 @@ class LLMProvider(ABC):
 class OllamaProvider(LLMProvider):
     """
     Ollama provider using the native /api/chat endpoint.
-    Supports both local instances and remote/web Ollama deployments.
-    API key is optional (required for some hosted/remote instances).
+    Supports remote Ollama Cloud / hosted deployments.
+    API key is required for protected cloud endpoints.
     """
 
     def __init__(
@@ -432,6 +434,45 @@ class OllamaProvider(LLMProvider):
 # 5. Agent (decoupled from the concrete LLM provider)
 # ============================================================
 
+def _tool_result_to_content(result: Any) -> str:
+    """Normalize tool output to a serializable string for the LLM context."""
+    if isinstance(result, (dict, list)):
+        content = json.dumps(result, indent=2, ensure_ascii=False)
+    else:
+        content = str(result)
+
+    if len(content) > 25000:
+        return content[:25000] + "\n\n... [truncated due to size]"
+    return content
+
+
+def _build_review_user_message(
+    owner: str,
+    repo: str,
+    base_branch: str,
+    feature_branch: str,
+    pr_number: Optional[int] = None,
+) -> str:
+    pr_message = f"Pull Request #{pr_number} exists." if pr_number else "No PR number was provided."
+    return (
+        f"Review the `{feature_branch}` branch against `{base_branch}` "
+        f"in the `{owner}/{repo}` repository.\n"
+        f"{pr_message}\n\n"
+        "Strictly follow the defined algorithm and output format."
+    )
+
+
+def _build_tool_call_payload(tool_call: ToolCall) -> Dict[str, Any]:
+    return {
+        "id": tool_call.id,
+        "type": "function",
+        "function": {
+            "name": tool_call.name,
+            "arguments": tool_call.arguments,
+        },
+    }
+
+
 def review_branch(
     llm_provider: LLMProvider,
     owner: str,
@@ -447,43 +488,37 @@ def review_branch(
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": (
-                f"Review the `{feature_branch}` branch against `{base_branch}` "
-                f"in the `{owner}/{repo}` repository.\n"
-                f"{'Pull Request #' + str(pr_number) + ' exists.' if pr_number else 'No PR number was provided.'}\n\n"
-                "Strictly follow the defined algorithm and output format."
-            ),
-        },
+        {"role": "user", "content": _build_review_user_message(
+            owner=owner,
+            repo=repo,
+            base_branch=base_branch,
+            feature_branch=feature_branch,
+            pr_number=pr_number,
+        )},
     ]
 
-    MAX_ITERATIONS = 20
+    tool_registry = {
+        "get_comparison": lambda args: get_comparison(owner, repo, args["base"], args["head"]),
+        "get_pr_files": lambda args: get_pr_files(owner, repo, args["pr_number"]),
+        "get_file_content": lambda args: get_file_content(owner, repo, args["path"], args["ref"]),
+        "get_raw_diff": lambda args: get_raw_diff(owner, repo, args["base"], args["head"]),
+    }
 
-    for iteration in range(MAX_ITERATIONS):
+    for _ in range(MAX_AGENT_ITERATIONS):
         assistant_msg = llm_provider.chat(
             messages=messages,
             tools=TOOLS,
             temperature=0.1,
         )
 
-        # Convert to a message dict for the conversation history
         msg_dict: Dict[str, Any] = {"role": "assistant"}
 
         if assistant_msg.content:
             msg_dict["content"] = assistant_msg.content
 
         if assistant_msg.has_tool_calls:
-            # Format compatible with most providers
             msg_dict["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": tc.arguments,
-                    },
-                }
+                _build_tool_call_payload(tc)
                 for tc in assistant_msg.tool_calls
             ]
 
@@ -492,76 +527,49 @@ def review_branch(
         if not assistant_msg.has_tool_calls:
             return assistant_msg.content or ""
 
-        # Execute tools
-        TOOL_REGISTRY = {
-            "get_comparison": lambda args: get_comparison(owner, repo, args["base"], args["head"]),
-            "get_pr_files": lambda args: get_pr_files(owner, repo, args["pr_number"]),
-            "get_file_content": lambda args: get_file_content(owner, repo, args["path"], args["ref"]),
-            "get_raw_diff": lambda args: get_raw_diff(owner, repo, args["base"], args["head"]),
-        }
-
         for tc in assistant_msg.tool_calls:
             try:
-                tool = TOOL_REGISTRY.get(tc.name)
+                tool = tool_registry.get(tc.name)
                 result = tool(tc.arguments) if tool else f"Unknown tool: {tc.name}"
-            except Exception as e:
-                result = f"Error in tool {tc.name}: {str(e)}"
-
-            content = (
-                json.dumps(result, indent=2, ensure_ascii=False)
-                if isinstance(result, (dict, list))
-                else str(result)
-            )
-            if len(content) > 25000:
-                content = content[:25000] + "\n\n... [truncated due to size]"
+            except Exception as exc:  # pragma: no cover - defensive path for external APIs
+                result = f"Error in tool {tc.name}: {exc}"
 
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
-                "content": content,
+                "content": _tool_result_to_content(result),
             })
 
-
-    raise RuntimeError(f"Maximum agent iterations reached ({MAX_ITERATIONS}). Possible tool-calling loop detected.")
+    raise RuntimeError(
+        f"Maximum agent iterations reached ({MAX_AGENT_ITERATIONS}). Possible tool-calling loop detected."
+    )
 
 # ============================================================
 # 6. Example usage
 # ============================================================
 
-def main():
+def _require_env(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
 
-    model = os.getenv("MODEL")
-    ollama_host = os.getenv("OLLAMA_HOST")
+
+def main():
+    model = _require_env("MODEL")
+    ollama_host = _require_env("OLLAMA_HOST")
     ollama_api_key = os.getenv("OLLAMA_API_KEY")
 
-    github_owner = os.getenv("GITHUB_OWNER")
-    github_repo = os.getenv("GITHUB_REPOSITORY")
-    base_branch = os.getenv("BASE_BRANCH")
-    feature_branch = os.getenv("FEATURE_BRANCH")
+    github_owner = _require_env("GITHUB_OWNER")
+    github_repo = _require_env("GITHUB_REPOSITORY")
+    base_branch = _require_env("BASE_BRANCH")
+    feature_branch = _require_env("FEATURE_BRANCH")
 
-    required_settings = {
-        "MODEL": model,
-        "OLLAMA_HOST": ollama_host,
-        "GITHUB_OWNER": github_owner,
-        "GITHUB_REPOSITORY": github_repo,
-        "BASE_BRANCH": base_branch,
-        "FEATURE_BRANCH": feature_branch,
-    }
-    missing_settings = [
-        name for name, value in required_settings.items() if not value
-    ]
-    if missing_settings:
-        raise RuntimeError(
-            "Missing required environment variables: "
-            + ", ".join(missing_settings)
-        )
-
-    # Create Ollama provider instance (model is injected here)
     ollama = OllamaProvider(
         base_url=ollama_host,
         default_model=model,
         api_key=ollama_api_key,
-        timeout=180,
+        timeout=DEFAULT_LLM_TIMEOUT,
     )
 
     report = review_branch(
